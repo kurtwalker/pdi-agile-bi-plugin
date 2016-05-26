@@ -17,11 +17,6 @@
 
 package org.pentaho.agilebi.spoon;
 
-import java.io.File;
-import java.io.FileInputStream;
-import java.io.IOException;
-import java.util.ArrayList;
-
 import org.apache.commons.io.IOUtils;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.widgets.Display;
@@ -29,6 +24,8 @@ import org.pentaho.agilebi.modeler.IModelerSource;
 import org.pentaho.agilebi.modeler.ModelerException;
 import org.pentaho.agilebi.modeler.ModelerMessagesHolder;
 import org.pentaho.agilebi.modeler.ModelerWorkspace;
+import org.pentaho.agilebi.modeler.models.annotations.ModelAnnotationGroup;
+import org.pentaho.agilebi.modeler.models.annotations.ModelAnnotationGroupXmlReader;
 import org.pentaho.agilebi.modeler.util.ModelerWorkspaceUtil;
 import org.pentaho.agilebi.modeler.util.TableModelerSource;
 import org.pentaho.agilebi.spoon.perspective.AgileBiModelerPerspective;
@@ -39,12 +36,16 @@ import org.pentaho.di.core.Const;
 import org.pentaho.di.core.EngineMetaInterface;
 import org.pentaho.di.core.ProvidesDatabaseConnectionInformation;
 import org.pentaho.di.core.database.DatabaseMeta;
+import org.pentaho.di.core.exception.KettleXMLException;
 import org.pentaho.di.core.gui.SpoonFactory;
+import org.pentaho.di.core.logging.LogChannelInterface;
+import org.pentaho.di.core.xml.XMLHandler;
 import org.pentaho.di.i18n.BaseMessages;
 import org.pentaho.di.job.JobMeta;
 import org.pentaho.di.job.entry.JobEntryCopy;
 import org.pentaho.di.repository.Repository;
 import org.pentaho.di.trans.TransMeta;
+import org.pentaho.di.trans.step.BaseStepMeta;
 import org.pentaho.di.trans.step.StepMeta;
 import org.pentaho.di.ui.core.database.dialog.DatabaseExplorerDialog;
 import org.pentaho.di.ui.core.dialog.ErrorDialog;
@@ -67,6 +68,16 @@ import org.pentaho.ui.xul.impl.AbstractXulEventHandler;
 import org.pentaho.xul.swt.tab.TabItem;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.IOException;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.util.ArrayList;
 
 public class ModelerHelper extends AbstractXulEventHandler implements ISpoonMenuController {
 
@@ -313,7 +324,10 @@ public class ModelerHelper extends AbstractXulEventHandler implements ISpoonMenu
 	  if( o != null && ProvidesDatabaseConnectionInformation.class.isAssignableFrom(o.getClass()) ) {
       return ProvidesDatabaseConnectionInformation.class.cast(o);
 	  }
-    return null;
+    TransMeta transMeta = ( (BaseStepMeta) o).getParentStepMeta().getParentTransMeta();
+    LogChannelInterface logChannel = transMeta.getLogChannel();
+    Repository repository = transMeta.getRepository();
+    return new DataServiceConnectionInformation( "randomGeneratedName", repository, logChannel );
   }
   
   public static ModelerWorkspace populateModel(ModelerWorkspace model) throws ModelerException {
@@ -353,6 +367,27 @@ public class ModelerHelper extends AbstractXulEventHandler implements ISpoonMenu
 	}
     
     return model;
+  }
+
+  private static ModelAnnotationGroup getAnnotations( final ProvidesDatabaseConnectionInformation connectionInfo ) {
+    try {
+      Class.forName( "org.pentaho.di.trans.dataservice.jdbc.ThinDriver" );
+    } catch ( ClassNotFoundException e ) {
+      e.printStackTrace();
+      return new ModelAnnotationGroup(  );
+    }
+    try ( Connection connection = DriverManager.getConnection( "jdbc:pdi://localhost:9999/kettle?local=true" ) ) {
+      PreparedStatement preparedStatement =
+        connection.prepareStatement( "show annotations from " + connectionInfo.getTableName() );
+      ResultSet resultSet = preparedStatement.executeQuery();
+      resultSet.next();
+      String annotationsXml = resultSet.getString( 1 );
+      org.w3c.dom.Document document = XMLHandler.loadXMLString( annotationsXml );
+      return new ModelAnnotationGroupXmlReader().readModelAnnotationGroup( document );
+    } catch ( SQLException | KettleXMLException e ) {
+      e.printStackTrace();
+      return new ModelAnnotationGroup(  );
+    }
   }
 
 
@@ -602,6 +637,8 @@ public class ModelerHelper extends AbstractXulEventHandler implements ISpoonMenu
       model.getWorkspaceHelper().autoModelFlat(model);
     }
     model.getWorkspaceHelper().populateDomain(model);
+    ModelAnnotationGroup modelAnnotations = getAnnotations( getDatabaseConnectionInformationForCurrentTransStep( Spoon.getInstance() )  );
+    modelAnnotations.applyAnnotations( model, Spoon.getInstance().getMetaStore() );
     ModelerWorkspaceUtil.saveWorkspace( model, fileName);
     
     /*
